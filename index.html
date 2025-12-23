@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <title>Chicken Subway Runner</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        touch-action: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      body {
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: #87ceeb;
+        font-family: Arial, sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      #gameCanvas {
+        display: block;
+        background: linear-gradient(to bottom, #87ceeb 0%, #e0f6ff 100%);
+        min-width: 800px;
+        min-height: 600px;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      #ui {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+
+      .btn {
+        pointer-events: auto;
+        cursor: pointer;
+        border: none;
+        border-radius: 8px;
+        font-size: 16px;
+        font-weight: bold;
+        color: white;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        transition: transform 0.1s;
+        user-select: none;
+      }
+
+      .btn:active {
+        transform: scale(0.95);
+      }
+
+      #closeBtn {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        width: 40px;
+        height: 40px;
+        background: rgba(0, 0, 0, 0.5);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        line-height: 1;
+      }
+
+      #ctaBtn {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 14px 40px;
+        background: linear-gradient(135deg, #ff6b6b 0%, #ff8e53 100%);
+        box-shadow: 0 4px 15px rgba(255, 107, 107, 0.4);
+      }
+
+      #score {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        color: white;
+        font-size: 24px;
+        font-weight: bold;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="ui">
+      <div id="score">0</div>
+      <button id="closeBtn" class="btn">×</button>
+      <button id="ctaBtn" class="btn">Play</button>
+    </div>
+
+    <script>
+      // ============================================
+      // КОНФИГУРАЦИЯ ПЕРСПЕКТИВЫ И ДОРОГИ
+      // ============================================
+      const Config = {
+        // Размеры дороги (в пикселях на экране)
+        nearWidth: 600, // Ширина дороги внизу (близко к игроку)
+        farWidth: 120, // Ширина дороги вверху (далеко)
+        vanishingY: -200, // Y координата точки схода (отрицательная = выше экрана)
+
+        // Скорость и движение
+        speed: 8, // Скорость движения вперед (пикселей за кадр)
+        tieSpacing: 60, // Расстояние между шпалами (в единицах z)
+
+        // Перспектива
+        perspectivePower: 1.3, // Степень для easing перспективы (больше = более выраженная)
+        maxZ: 2000, // Максимальная глубина (дальняя точка)
+
+        // Lanes (дорожки)
+        laneCount: 3,
+        laneWidth: 0.33, // Ширина каждой lane относительно ширины дороги
+
+        // Курица
+        chickenSize: 50,
+        chickenY: 0.75, // Позиция курицы по Y (0.75 = 75% от низа экрана)
+
+        // Препятствия
+        obstacleSpawnRate: 0.003, // Вероятность появления препятствия за кадр
+        obstacleMinZ: 100,
+        obstacleMaxZ: 1500,
+        obstacleSize: 40,
+
+        // Цвета
+        roadColor: "#4A4A4A",
+        railColor: "#2C2C2C",
+        tieColor: "#8B7355",
+        laneDividerColor: "#FFFFFF",
+        obstacleColor: "#FF4444",
+      };
+
+      // ============================================
+      // КЛАСС ДЛЯ РЕНДЕРИНГА ДОРОГИ И РЕЛЬСОВ
+      // ============================================
+      class TrackRenderer {
+        constructor(canvas, ctx) {
+          this.canvas = canvas;
+          this.ctx = ctx;
+          this.scrollZ = 0; // Текущая позиция по оси Z
+          this.ties = []; // Массив шпал для рециклинга
+          this.initTies();
+        }
+
+        initTies() {
+          // Создаем начальный набор шпал
+          const tieCount = Math.ceil(Config.maxZ / Config.tieSpacing) + 5;
+          for (let i = 0; i < tieCount; i++) {
+            this.ties.push({
+              z: i * Config.tieSpacing,
+            });
+          }
+        }
+
+        // Проекция перспективы: t от 0 (внизу) до 1 (вверху)
+        // Возвращает {x, y, width, scale}
+        project(t) {
+          const eased = Math.pow(t, Config.perspectivePower);
+          const y =
+            Config.vanishingY +
+            (this.canvas.height - Config.vanishingY) * (1 - eased);
+          const width =
+            Config.nearWidth + (Config.farWidth - Config.nearWidth) * eased;
+          const scale = width / Config.nearWidth;
+          return { y, width, scale, t };
+        }
+
+        // Проекция по Z координате
+        projectZ(z) {
+          const normalizedZ = z / Config.maxZ;
+          return this.project(normalizedZ);
+        }
+
+        // Получить X позицию для lane (0, 1, 2)
+        getLaneX(lane, proj) {
+          const lanePositions = [0.25, 0.5, 0.75]; // Позиции lanes относительно ширины дороги
+          const laneX = lanePositions[lane] * proj.width;
+          return this.canvas.width / 2 - proj.width / 2 + laneX;
+        }
+
+        update(deltaTime) {
+          this.scrollZ += Config.speed;
+
+          // Рециклинг шпал
+          this.ties.forEach((tie) => {
+            tie.z -= Config.speed;
+            if (tie.z < 0) {
+              tie.z += Config.maxZ;
+            }
+          });
+        }
+
+        render() {
+          const ctx = this.ctx;
+          const centerX = this.canvas.width / 2;
+
+          // Отрисовка дороги (трапеция)
+          ctx.fillStyle = Config.roadColor;
+          ctx.beginPath();
+          const nearProj = this.project(0);
+          const farProj = this.project(1);
+          ctx.moveTo(centerX - nearProj.width / 2, this.canvas.height);
+          ctx.lineTo(centerX - farProj.width / 2, farProj.y);
+          ctx.lineTo(centerX + farProj.width / 2, farProj.y);
+          ctx.lineTo(centerX + nearProj.width / 2, this.canvas.height);
+          ctx.closePath();
+          ctx.fill();
+
+          // Отрисовка разделителей lanes
+          ctx.strokeStyle = Config.laneDividerColor;
+          ctx.lineWidth = 2;
+          ctx.setLineDash([10, 10]);
+          for (let lane = 1; lane < Config.laneCount; lane++) {
+            this.drawLaneDivider(lane);
+          }
+          ctx.setLineDash([]);
+
+          // Отрисовка рельсов (4 рельса: 2 внешних + 2 внутренних)
+          ctx.strokeStyle = Config.railColor;
+          ctx.lineWidth = 4;
+          const railPositions = [0.15, 0.35, 0.65, 0.85]; // Позиции рельсов
+          railPositions.forEach((railPos) => {
+            this.drawRail(railPos);
+          });
+
+          // Отрисовка шпал
+          ctx.fillStyle = Config.tieColor;
+          this.ties.forEach((tie) => {
+            this.drawTie(tie.z);
+          });
+        }
+
+        drawLaneDivider(laneIndex) {
+          const ctx = this.ctx;
+          const centerX = this.canvas.width / 2;
+          const steps = 20;
+
+          ctx.beginPath();
+          for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const proj = this.project(t);
+            const laneX = this.getLaneX(laneIndex, proj);
+            if (i === 0) {
+              ctx.moveTo(laneX, proj.y);
+            } else {
+              ctx.lineTo(laneX, proj.y);
+            }
+          }
+          ctx.stroke();
+        }
+
+        drawRail(railPosition) {
+          const ctx = this.ctx;
+          const centerX = this.canvas.width / 2;
+          const steps = 30;
+
+          ctx.beginPath();
+          for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const proj = this.project(t);
+            const railX = centerX - proj.width / 2 + railPosition * proj.width;
+            if (i === 0) {
+              ctx.moveTo(railX, proj.y);
+            } else {
+              ctx.lineTo(railX, proj.y);
+            }
+          }
+          ctx.stroke();
+        }
+
+        drawTie(z) {
+          const normalizedZ = (z % Config.maxZ) / Config.maxZ;
+          const proj = this.projectZ(z);
+
+          if (proj.y < Config.vanishingY || proj.y > this.canvas.height) {
+            return; // Шпала вне экрана
+          }
+
+          const ctx = this.ctx;
+          const centerX = this.canvas.width / 2;
+          const tieHeight = 8 * proj.scale;
+          const tieWidth = proj.width * 0.9;
+
+          ctx.fillRect(
+            centerX - tieWidth / 2,
+            proj.y - tieHeight / 2,
+            tieWidth,
+            tieHeight
+          );
+        }
+      }
+
+      // ============================================
+      // КЛАСС КУРИЦЫ
+      // ============================================
+      class Chicken {
+        constructor(canvas, ctx, trackRenderer) {
+          this.canvas = canvas;
+          this.ctx = ctx;
+          this.trackRenderer = trackRenderer;
+          this.lane = 1; // Текущая lane (0, 1, 2)
+          this.targetLane = 1;
+          this.x = 0; // Текущая X позиция (интерполированная)
+          this.y = 0;
+          this.size = Config.chickenSize;
+          this.animationFrame = 0;
+          this.updatePosition();
+        }
+
+        updatePosition() {
+          const trackRenderer =
+            this.trackRenderer || window.game?.trackRenderer;
+          const proj = trackRenderer.project(Config.chickenY);
+          this.y = proj.y;
+
+          // Плавная интерполяция к целевой lane
+          const targetX = trackRenderer.getLaneX(this.targetLane, proj);
+          this.x += (targetX - this.x) * 0.15; // Коэффициент интерполяции
+        }
+
+        changeLane(direction) {
+          this.targetLane = Math.max(
+            0,
+            Math.min(Config.laneCount - 1, this.targetLane + direction)
+          );
+        }
+
+        update() {
+          this.updatePosition();
+          this.animationFrame += 0.2;
+        }
+
+        render() {
+          const ctx = this.ctx;
+          const trackRenderer =
+            this.trackRenderer || window.game?.trackRenderer;
+          const proj = trackRenderer.project(Config.chickenY);
+          const scale = proj.scale;
+
+          ctx.save();
+          ctx.translate(this.x, this.y);
+          ctx.scale(scale, scale);
+
+          // Простая анимация курицы (прыжок/бег)
+          const frame = Math.floor(this.animationFrame) % 4;
+          const offsetY = Math.sin(this.animationFrame * 0.3) * 3;
+
+          ctx.fillStyle = "#FFD700"; // Золотой цвет курицы
+          ctx.beginPath();
+          // Тело курицы (овал)
+          ctx.ellipse(
+            0,
+            offsetY,
+            this.size * 0.4,
+            this.size * 0.3,
+            0,
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+
+          // Голова
+          ctx.fillStyle = "#FFA500";
+          ctx.beginPath();
+          ctx.arc(
+            this.size * 0.25,
+            offsetY - this.size * 0.15,
+            this.size * 0.2,
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+
+          // Клюв
+          ctx.fillStyle = "#FF6347";
+          ctx.beginPath();
+          ctx.moveTo(this.size * 0.35, offsetY - this.size * 0.15);
+          ctx.lineTo(this.size * 0.5, offsetY - this.size * 0.1);
+          ctx.lineTo(this.size * 0.35, offsetY - this.size * 0.05);
+          ctx.closePath();
+          ctx.fill();
+
+          // Ноги (анимация бега)
+          ctx.strokeStyle = "#FF6347";
+          ctx.lineWidth = 3;
+          const legOffset = Math.sin(this.animationFrame * 0.5) * 5;
+          ctx.beginPath();
+          ctx.moveTo(-this.size * 0.15, offsetY + this.size * 0.2);
+          ctx.lineTo(-this.size * 0.15 + legOffset, offsetY + this.size * 0.35);
+          ctx.moveTo(this.size * 0.15, offsetY + this.size * 0.2);
+          ctx.lineTo(this.size * 0.15 - legOffset, offsetY + this.size * 0.35);
+          ctx.stroke();
+
+          ctx.restore();
+        }
+
+        getBounds() {
+          const trackRenderer =
+            this.trackRenderer || window.game?.trackRenderer;
+          if (!trackRenderer) {
+            // Fallback bounds if trackRenderer is not available
+            return {
+              x: this.x,
+              y: this.y,
+              width: this.size,
+              height: this.size * 0.6,
+            };
+          }
+          const proj = trackRenderer.project(Config.chickenY);
+          const scale = proj.scale;
+          return {
+            x: this.x,
+            y: this.y,
+            width: this.size * scale,
+            height: this.size * scale * 0.6,
+          };
+        }
+      }
+
+      // ============================================
+      // КЛАСС ПРЕПЯТСТВИЯ
+      // ============================================
+      class Obstacle {
+        constructor(lane, z) {
+          this.lane = lane;
+          this.z = z;
+          this.size = Config.obstacleSize;
+        }
+
+        update() {
+          this.z -= Config.speed;
+        }
+
+        render(ctx, trackRenderer) {
+          const normalizedZ = this.z / Config.maxZ;
+          if (normalizedZ < 0 || normalizedZ > 1) return;
+
+          const proj = trackRenderer.projectZ(this.z);
+          const x = trackRenderer.getLaneX(this.lane, proj);
+          const size = this.size * proj.scale;
+
+          ctx.fillStyle = Config.obstacleColor;
+          ctx.fillRect(x - size / 2, proj.y - size / 2, size, size);
+
+          // Простой барьер (прямоугольник с крестом)
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x - size / 2, proj.y - size / 2, size, size);
+          ctx.beginPath();
+          ctx.moveTo(x - size / 2, proj.y - size / 2);
+          ctx.lineTo(x + size / 2, proj.y + size / 2);
+          ctx.moveTo(x + size / 2, proj.y - size / 2);
+          ctx.lineTo(x - size / 2, proj.y + size / 2);
+          ctx.stroke();
+        }
+
+        getBounds(trackRenderer) {
+          const normalizedZ = this.z / Config.maxZ;
+          if (normalizedZ < 0 || normalizedZ > 1) return null;
+
+          const proj = trackRenderer.projectZ(this.z);
+          const x = trackRenderer.getLaneX(this.lane, proj);
+          const size = this.size * proj.scale;
+
+          return {
+            x: x - size / 2,
+            y: proj.y - size / 2,
+            width: size,
+            height: size,
+          };
+        }
+      }
+
+      // ============================================
+      // ГЛАВНЫЙ КЛАСС ИГРЫ
+      // ============================================
+      class Game {
+        constructor() {
+          this.canvas = document.getElementById("gameCanvas");
+          this.ctx = this.canvas.getContext("2d");
+          this.trackRenderer = new TrackRenderer(this.canvas, this.ctx);
+          this.chicken = new Chicken(this.canvas, this.ctx, this.trackRenderer);
+          this.obstacles = [];
+          this.score = 0;
+          this.gameOver = false;
+          this.lastTime = 0;
+          this.touchStartX = 0;
+          this.touchStartY = 0;
+
+          this.setupCanvas();
+          this.setupControls();
+          this.setupUI();
+          this.animate(0);
+        }
+
+        setupCanvas() {
+          const resize = () => {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = this.canvas.getBoundingClientRect();
+            this.canvas.width = rect.width * dpr;
+            this.canvas.height = rect.height * dpr;
+            this.ctx.scale(dpr, dpr);
+            this.canvas.style.width = rect.width + "px";
+            this.canvas.style.height = rect.height + "px";
+          };
+
+          resize();
+          window.addEventListener("resize", resize);
+        }
+
+        setupControls() {
+          // Клавиатура
+          document.addEventListener("keydown", (e) => {
+            if (e.key === "ArrowLeft") {
+              this.chicken.changeLane(-1);
+            } else if (e.key === "ArrowRight") {
+              this.chicken.changeLane(1);
+            }
+          });
+
+          // Touch/Swipe
+          this.canvas.addEventListener("touchstart", (e) => {
+            e.preventDefault();
+            this.touchStartX = e.touches[0].clientX;
+            this.touchStartY = e.touches[0].clientY;
+          });
+
+          this.canvas.addEventListener("touchend", (e) => {
+            e.preventDefault();
+            if (!this.touchStartX) return;
+
+            const touchEndX = e.changedTouches[0].clientX;
+            const touchEndY = e.changedTouches[0].clientY;
+            const dx = touchEndX - this.touchStartX;
+            const dy = touchEndY - this.touchStartY;
+
+            if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 30) {
+              if (dx > 0) {
+                this.chicken.changeLane(1);
+              } else {
+                this.chicken.changeLane(-1);
+              }
+            }
+
+            this.touchStartX = 0;
+          });
+
+          // Mouse drag
+          let mouseDown = false;
+          let mouseStartX = 0;
+
+          this.canvas.addEventListener("mousedown", (e) => {
+            mouseDown = true;
+            mouseStartX = e.clientX;
+          });
+
+          this.canvas.addEventListener("mouseup", (e) => {
+            if (mouseDown) {
+              const dx = e.clientX - mouseStartX;
+              if (Math.abs(dx) > 30) {
+                if (dx > 0) {
+                  this.chicken.changeLane(1);
+                } else {
+                  this.chicken.changeLane(-1);
+                }
+              }
+            }
+            mouseDown = false;
+          });
+        }
+
+        setupUI() {
+          document.getElementById("closeBtn").addEventListener("click", () => {
+            // Закрытие playable (в реальном случае - закрытие рекламы)
+            console.log("Close clicked");
+          });
+
+          document.getElementById("ctaBtn").addEventListener("click", () => {
+            window.open("https://example.com", "_blank");
+          });
+        }
+
+        spawnObstacle() {
+          if (Math.random() < Config.obstacleSpawnRate) {
+            const lane = Math.floor(Math.random() * Config.laneCount);
+            const z =
+              Config.obstacleMinZ +
+              Math.random() * (Config.obstacleMaxZ - Config.obstacleMinZ);
+            this.obstacles.push(new Obstacle(lane, z));
+          }
+        }
+
+        updateObstacles() {
+          this.obstacles.forEach((obstacle) => obstacle.update());
+          this.obstacles = this.obstacles.filter((obstacle) => obstacle.z > 0);
+        }
+
+        checkCollisions() {
+          const chickenBounds = this.chicken.getBounds();
+
+          for (const obstacle of this.obstacles) {
+            const obstacleBounds = obstacle.getBounds(this.trackRenderer);
+            if (!obstacleBounds) continue;
+
+            // Простая проверка коллизии AABB
+            if (
+              chickenBounds.x < obstacleBounds.x + obstacleBounds.width &&
+              chickenBounds.x + chickenBounds.width > obstacleBounds.x &&
+              chickenBounds.y < obstacleBounds.y + obstacleBounds.height &&
+              chickenBounds.y + chickenBounds.height > obstacleBounds.y
+            ) {
+              // Столкновение!
+              this.gameOver = true;
+              return;
+            }
+          }
+        }
+
+        update(deltaTime) {
+          if (this.gameOver) return;
+
+          this.trackRenderer.update(deltaTime);
+          this.chicken.update();
+          this.spawnObstacle();
+          this.updateObstacles();
+          this.checkCollisions();
+
+          // Обновление счета
+          this.score = Math.floor(this.trackRenderer.scrollZ / 10);
+          document.getElementById("score").textContent = this.score;
+        }
+
+        render() {
+          const ctx = this.ctx;
+          const width = this.canvas.width / (window.devicePixelRatio || 1);
+          const height = this.canvas.height / (window.devicePixelRatio || 1);
+
+          // Очистка
+          ctx.clearRect(0, 0, width, height);
+
+          // Рендер дороги
+          this.trackRenderer.render();
+
+          // Рендер препятствий
+          this.obstacles.forEach((obstacle) => {
+            obstacle.render(ctx, this.trackRenderer);
+          });
+
+          // Рендер курицы
+          this.chicken.render();
+
+          // Game Over overlay
+          if (this.gameOver) {
+            ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+            ctx.fillRect(0, 0, width, height);
+            ctx.fillStyle = "#FFFFFF";
+            ctx.font = "bold 48px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText("Game Over", width / 2, height / 2);
+            ctx.font = "24px Arial";
+            ctx.fillText(`Score: ${this.score}`, width / 2, height / 2 + 50);
+          }
+        }
+
+        animate(currentTime) {
+          const deltaTime = currentTime - this.lastTime;
+          this.lastTime = currentTime;
+
+          this.update(deltaTime);
+          this.render();
+
+          requestAnimationFrame((time) => this.animate(time));
+        }
+      }
+
+      // ============================================
+      // ЗАПУСК ИГРЫ
+      // ============================================
+      window.game = new Game();
+
+      // ============================================
+      // ИНСТРУКЦИЯ ПО НАСТРОЙКЕ ПЕРСПЕКТИВЫ
+      // ============================================
+      /*
+        ПАРАМЕТРЫ ДЛЯ НАСТРОЙКИ ПЕРСПЕКТИВЫ (в объекте Config):
+        
+        1. nearWidth - ширина дороги внизу экрана (близко к игроку)
+           Увеличить = дорога шире внизу
+           Уменьшить = дорога уже внизу
+        
+        2. farWidth - ширина дороги вверху экрана (далеко от игрока)
+           Увеличить = дорога шире вверху (менее выраженная перспектива)
+           Уменьшить = дорога уже вверху (более выраженная перспектива)
+        
+        3. vanishingY - Y координата точки схода (отрицательная = выше экрана)
+           Уменьшить (более отрицательное) = точка схода выше, более крутая перспектива
+           Увеличить (менее отрицательное) = точка схода ниже, более пологая перспектива
+        
+        4. perspectivePower - степень для easing перспективы
+           Увеличить (например, 1.5) = более выраженная перспектива, быстрее сужается
+           Уменьшить (например, 1.0) = более линейная перспектива
+        
+        5. tieSpacing - расстояние между шпалами
+           Увеличить = шпалы реже
+           Уменьшить = шпалы чаще
+        
+        6. speed - скорость движения вперед
+           Увеличить = быстрее движение
+           Уменьшить = медленнее движение
+        
+        Для совпадения со скрином:
+        - Сравните ширину дороги внизу и вверху на скриншоте
+        - Настройте nearWidth и farWidth соответственно
+        - Отрегулируйте vanishingY для нужного угла перспективы
+        - Используйте perspectivePower для тонкой настройки кривизны
+        */
+    </script>
+  </body>
+</html>
